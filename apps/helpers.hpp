@@ -32,6 +32,8 @@
 #include "glm/mat4x4.hpp"
 #include "glm/gtc/matrix_transform.hpp"
 
+#include "Eigen/Core"
+
 #include "opencv2/core/core.hpp"
 
 #include <vector>
@@ -75,8 +77,8 @@ cv::Rect rescale_facebox(cv::Rect facebox, float scaling, float translation_y)
  */
 auto rcr_to_eos_landmark_collection(const rcr::LandmarkCollection<cv::Vec2f>& landmark_collection)
 {
-	eos::core::LandmarkCollection<cv::Vec2f> eos_landmark_collection;
-	std::transform(begin(landmark_collection), end(landmark_collection), std::back_inserter(eos_landmark_collection), [](auto&& lm) { return eos::core::Landmark<cv::Vec2f>{ lm.name, lm.coordinates }; });
+	eos::core::LandmarkCollection<Eigen::Vector2f> eos_landmark_collection;
+	std::transform(begin(landmark_collection), end(landmark_collection), std::back_inserter(eos_landmark_collection), [](auto&& lm) { return eos::core::Landmark<Eigen::Vector2f>{ lm.name, {lm.coordinates[0], lm.coordinates[1]} }; });
 	return eos_landmark_collection;
 };
 
@@ -125,7 +127,7 @@ cv::Rect make_bbox_square(cv::Rect bounding_box)
  * @param[in] viewport Viewport to draw the mesh.
  * @param[in] colour Colour of the mesh to be drawn.
  */
-void draw_wireframe(cv::Mat image, const eos::render::Mesh& mesh, glm::mat4x4 modelview, glm::mat4x4 projection, glm::vec4 viewport, cv::Scalar colour = cv::Scalar(0, 255, 0, 255))
+void draw_wireframe(cv::Mat image, const eos::core::Mesh& mesh, glm::mat4x4 modelview, glm::mat4x4 projection, glm::vec4 viewport, cv::Scalar colour = cv::Scalar(0, 255, 0, 255))
 {
 	for (const auto& triangle : mesh.tvi)
 	{
@@ -158,7 +160,7 @@ public:
 	 * be able to add frames from a live video and merge them on-the-fly.
 	 *
 	 * The threshold means: Each triangle with a view angle smaller than the given angle will be used to merge.
-	 * The default threshold (90°) means all triangles, as long as they're a little bit visible, are merged.
+	 * The default threshold (90ï¿½) means all triangles, as long as they're a little bit visible, are merged.
 	 *
 	 * @param[in] merge_threshold View-angle merge threshold, in degrees, from 0 to 90.
 	 */
@@ -169,7 +171,7 @@ public:
 		visibility_counter = cv::Mat::zeros(512, 512, CV_32SC1);
 		merged_isomap = cv::Mat::zeros(512, 512, CV_32FC4);
 
-		// map 0° to 255, 90° to 0:
+		// map 0ï¿½ to 255, 90ï¿½ to 0:
 		float alpha_thresh = (-255.f / 90.f) * merge_threshold + 255.f;
 		if (alpha_thresh < 0.f) // could maybe happen due to float inaccuracies / rounding?
 			alpha_thresh = 0.0f;

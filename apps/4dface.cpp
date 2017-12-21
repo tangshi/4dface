@@ -21,6 +21,7 @@
 
 #include "eos/core/Landmark.hpp"
 #include "eos/core/LandmarkMapper.hpp"
+#include "eos/core/Image_opencv_interop.hpp"
 #include "eos/fitting/fitting.hpp"
 #include "eos/fitting/orthographic_camera_estimation_linear.hpp"
 #include "eos/fitting/contour_correspondence.hpp"
@@ -36,6 +37,7 @@
 #include "glm/gtc/matrix_transform.hpp"
 #include "glm/gtc/quaternion.hpp"
 
+#include "Eigen/Core"
 #include "Eigen/Dense"
 
 #include "opencv2/core/core.hpp"
@@ -53,13 +55,14 @@ namespace po = boost::program_options;
 namespace fs = boost::filesystem;
 using cv::Mat;
 using cv::Vec2f;
-using cv::Vec3f;
-using cv::Vec4f;
 using cv::Rect;
 using std::cout;
 using std::endl;
 using std::vector;
 using std::string;
+
+using Eigen::Vector2f;
+using Eigen::VectorXf;
 
 void draw_axes_topright(float r_x, float r_y, float r_z, cv::Mat image);
 
@@ -70,27 +73,27 @@ void draw_axes_topright(float r_x, float r_y, float r_z, cv::Mat image);
  */
 int main(int argc, char *argv[])
 {
-	fs::path modelfile, inputvideo, facedetector, landmarkdetector, mappingsfile, contourfile, edgetopologyfile, blendshapesfile;
+	string modelfile, inputvideo, facedetector, landmarkdetector, mappingsfile, contourfile, edgetopologyfile, blendshapesfile;
 	try {
 		po::options_description desc("Allowed options");
 		desc.add_options()
 			("help,h",
 				"display the help message")
-			("morphablemodel,m", po::value<fs::path>(&modelfile)->required()->default_value("../share/sfm_shape_3448.bin"),
+			("morphablemodel,m", po::value<string>(&modelfile)->required()->default_value("../share/sfm_shape_3448.bin"),
 				"a Morphable Model stored as cereal BinaryArchive")
-			("facedetector,f", po::value<fs::path>(&facedetector)->required()->default_value("../share/haarcascade_frontalface_alt2.xml"),
+			("facedetector,f", po::value<string>(&facedetector)->required()->default_value("../share/haarcascade_frontalface_alt2.xml"),
 				"full path to OpenCV's face detector (haarcascade_frontalface_alt2.xml)")
-			("landmarkdetector,l", po::value<fs::path>(&landmarkdetector)->required()->default_value("../share/face_landmarks_model_rcr_68.bin"),
+			("landmarkdetector,l", po::value<string>(&landmarkdetector)->required()->default_value("../share/face_landmarks_model_rcr_68.bin"),
 				"learned landmark detection model")
-			("mapping,p", po::value<fs::path>(&mappingsfile)->required()->default_value("../share/ibug2did.txt"),
+			("mapping,p", po::value<string>(&mappingsfile)->required()->default_value("../share/ibug_to_sfm.txt"),
 				"landmark identifier to model vertex number mapping")
-			("model-contour,c", po::value<fs::path>(&contourfile)->required()->default_value("../share/model_contours.json"),
+			("model-contour,c", po::value<string>(&contourfile)->required()->default_value("../share/sfm_model_contours.json"),
 				"file with model contour indices")
-			("edge-topology,e", po::value<fs::path>(&edgetopologyfile)->required()->default_value("../share/sfm_3448_edge_topology.json"),
+			("edge-topology,e", po::value<string>(&edgetopologyfile)->required()->default_value("../share/sfm_3448_edge_topology.json"),
 				"file with model's precomputed edge topology")
-			("blendshapes,b", po::value<fs::path>(&blendshapesfile)->required()->default_value("../share/expression_blendshapes_3448.bin"),
+			("blendshapes,b", po::value<string>(&blendshapesfile)->required()->default_value("../share/expression_blendshapes_3448.bin"),
 				"file with blendshapes")
-			("input,i", po::value<fs::path>(&inputvideo),
+			("input,i", po::value<string>(&inputvideo),
 				"input video file. If not specified, camera 0 will be used.")
 			;
 		po::variables_map vm;
@@ -109,16 +112,16 @@ int main(int argc, char *argv[])
 	}
 
 	// Load the Morphable Model and the LandmarkMapper:
-	morphablemodel::MorphableModel morphable_model = morphablemodel::load_model(modelfile.string());
+	morphablemodel::MorphableModel morphable_model = morphablemodel::load_model(modelfile);
 	core::LandmarkMapper landmark_mapper = mappingsfile.empty() ? core::LandmarkMapper() : core::LandmarkMapper(mappingsfile);
 
-	fitting::ModelContour model_contour = contourfile.empty() ? fitting::ModelContour() : fitting::ModelContour::load(contourfile.string());
-	fitting::ContourLandmarks ibug_contour = fitting::ContourLandmarks::load(mappingsfile.string());
+	fitting::ModelContour model_contour = contourfile.empty() ? fitting::ModelContour() : fitting::ModelContour::load(contourfile);
+	fitting::ContourLandmarks ibug_contour = fitting::ContourLandmarks::load(mappingsfile);
 
 	rcr::detection_model rcr_model;
 	// Load the landmark detection model:
 	try {
-		rcr_model = rcr::load_detection_model(landmarkdetector.string());
+		rcr_model = rcr::load_detection_model(landmarkdetector);
 	}
 	catch (const cereal::Exception& e) {
 		cout << "Error reading the RCR model " << landmarkdetector << ": " << e.what() << endl;
@@ -127,7 +130,7 @@ int main(int argc, char *argv[])
 
 	// Load the face detector from OpenCV:
 	cv::CascadeClassifier face_cascade;
-	if (!face_cascade.load(facedetector.string()))
+	if (!face_cascade.load(facedetector))
 	{
 		cout << "Error loading the face detector " << facedetector << "." << endl;
 		return EXIT_FAILURE;
@@ -138,16 +141,16 @@ int main(int argc, char *argv[])
 		cap.open(0); // no file given, open the default camera
 	}
 	else {
-		cap.open(inputvideo.string());
+		cap.open(inputvideo);
 	}
 	if (!cap.isOpened()) {
 		cout << "Couldn't open the given file or camera 0." << endl;
 		return EXIT_FAILURE;
 	}
 
-	vector<morphablemodel::Blendshape> blendshapes = morphablemodel::load_blendshapes(blendshapesfile.string());
+	vector<morphablemodel::Blendshape> blendshapes = morphablemodel::load_blendshapes(blendshapesfile);
 
-	morphablemodel::EdgeTopology edge_topology = morphablemodel::load_edge_topology(edgetopologyfile.string());
+	morphablemodel::EdgeTopology edge_topology = morphablemodel::load_edge_topology(edgetopologyfile);
 
 	cv::namedWindow("video", 1);
 	cv::namedWindow("render", 1);
@@ -157,7 +160,7 @@ int main(int argc, char *argv[])
 	bool have_face = false;
 	rcr::LandmarkCollection<Vec2f> current_landmarks;
 	Rect current_facebox;
-	WeightedIsomapAveraging isomap_averaging(60.f); // merge all triangles that are facing <60° towards the camera
+	WeightedIsomapAveraging isomap_averaging(60.f); // merge all triangles that are facing <60ï¿½ towards the camera
 	PcaCoefficientMerging pca_shape_merging;
 
 	for (;;)
@@ -206,34 +209,34 @@ int main(int argc, char *argv[])
 		// Fit the 3DMM:
 		fitting::RenderingParameters rendering_params;
 		vector<float> shape_coefficients, blendshape_coefficients;
-		vector<Vec2f> image_points;
-		render::Mesh mesh;
-		std::tie(mesh, rendering_params) = fitting::fit_shape_and_pose(morphable_model, blendshapes, rcr_to_eos_landmark_collection(current_landmarks), landmark_mapper, unmodified_frame.cols, unmodified_frame.rows, edge_topology, ibug_contour, model_contour, 3, 5, 15.0f, boost::none, shape_coefficients, blendshape_coefficients, image_points);
+		vector<Vector2f> image_points;
+		core::Mesh mesh;
+		std::tie(mesh, rendering_params) = fitting::fit_shape_and_pose(morphable_model, blendshapes, rcr_to_eos_landmark_collection(current_landmarks), landmark_mapper, unmodified_frame.cols, unmodified_frame.rows, edge_topology, ibug_contour, model_contour, 3, 5, 15.0f, std::nullopt, shape_coefficients, blendshape_coefficients, image_points);
 
 		// Draw the 3D pose of the face:
 		draw_axes_topright(glm::eulerAngles(rendering_params.get_rotation())[0], glm::eulerAngles(rendering_params.get_rotation())[1], glm::eulerAngles(rendering_params.get_rotation())[2], frame);
-		
+
 		// Wireframe rendering of mesh of this frame (non-averaged):
 		draw_wireframe(frame, mesh, rendering_params.get_modelview(), rendering_params.get_projection(), fitting::get_opencv_viewport(frame.cols, frame.rows));
 
 		// Extract the texture using the fitted mesh from this frame:
-		Mat affine_cam = fitting::get_3x4_affine_camera_matrix(rendering_params, frame.cols, frame.rows);
-		Mat isomap = render::extract_texture(mesh, affine_cam, unmodified_frame, true, render::TextureInterpolation::NearestNeighbour, 512);
+		const Eigen::Matrix<float, 3, 4> affine_cam = fitting::get_3x4_affine_camera_matrix(rendering_params, frame.cols, frame.rows);
+		const core::Image4u isomap = render::extract_texture(mesh, affine_cam, core::from_mat(unmodified_frame), true, render::TextureInterpolation::NearestNeighbour, 512);
 
 		// Merge the isomaps - add the current one to the already merged ones:
-		Mat merged_isomap = isomap_averaging.add_and_merge(isomap);
+		Mat merged_isomap = isomap_averaging.add_and_merge(core::to_mat(isomap));
 		// Same for the shape:
 		shape_coefficients = pca_shape_merging.add_and_merge(shape_coefficients);
-		auto merged_shape = morphable_model.get_shape_model().draw_sample(shape_coefficients) + morphablemodel::to_matrix(blendshapes) * Mat(blendshape_coefficients);
-		render::Mesh merged_mesh = morphablemodel::sample_to_mesh(merged_shape, morphable_model.get_color_model().get_mean(), morphable_model.get_shape_model().get_triangle_list(), morphable_model.get_color_model().get_triangle_list(), morphable_model.get_texture_coordinates());
+		VectorXf merged_shape = morphable_model.get_shape_model().draw_sample(shape_coefficients) + morphablemodel::to_matrix(blendshapes) * Eigen::Map<const VectorXf>(blendshape_coefficients.data(), blendshape_coefficients.size());
+		core::Mesh merged_mesh = morphablemodel::sample_to_mesh(merged_shape, morphable_model.get_color_model().get_mean(), morphable_model.get_shape_model().get_triangle_list(), morphable_model.get_color_model().get_triangle_list(), morphable_model.get_texture_coordinates());
 
 		// Render the model in a separate window using the estimated pose, shape and merged texture:
-		Mat rendering;
+		core::Image4u rendering;
 		auto modelview_no_translation = rendering_params.get_modelview();
 		modelview_no_translation[3][0] = 0;
 		modelview_no_translation[3][1] = 0;
 		std::tie(rendering, std::ignore) = render::render(merged_mesh, modelview_no_translation, glm::ortho(-130.0f, 130.0f, -130.0f, 130.0f), 256, 256, render::create_mipmapped_texture(merged_isomap), true, false, false);
-		cv::imshow("render", rendering);
+		cv::imshow("render", core::to_mat(rendering));
 
 		cv::imshow("video", frame);
 		auto key = cv::waitKey(30);
@@ -244,8 +247,8 @@ int main(int argc, char *argv[])
 		}
 		if (key == 's') {
 			// save an obj + current merged isomap to the disk:
-			render::Mesh neutral_expression = morphablemodel::sample_to_mesh(morphable_model.get_shape_model().draw_sample(shape_coefficients), morphable_model.get_color_model().get_mean(), morphable_model.get_shape_model().get_triangle_list(), morphable_model.get_color_model().get_triangle_list(), morphable_model.get_texture_coordinates());
-			render::write_textured_obj(neutral_expression, "current_merged.obj");
+			core::Mesh neutral_expression = morphablemodel::sample_to_mesh(morphable_model.get_shape_model().draw_sample(shape_coefficients), morphable_model.get_color_model().get_mean(), morphable_model.get_shape_model().get_triangle_list(), morphable_model.get_color_model().get_triangle_list(), morphable_model.get_texture_coordinates());
+			core::write_textured_obj(neutral_expression, "current_merged.obj");
 			cv::imwrite("current_merged.isomap.png", merged_isomap);
 		}
 	}
