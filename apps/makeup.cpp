@@ -206,7 +206,6 @@ int main(int argc, char *argv[])
 			enclosing_bbox = get_enclosing_bbox(rcr::to_row(current_landmarks));
 			enclosing_bbox = make_bbox_square(enclosing_bbox);
 			current_landmarks = rcr_model.detect(unmodified_frame, enclosing_bbox);
-			rcr::draw_landmarks(frame, current_landmarks, { 255, 0, 0 }); // blue, the new optimised landmarks
 		}
 
 		// Fit the 3DMM:
@@ -219,29 +218,48 @@ int main(int argc, char *argv[])
 														  rendering_params.get_screen_width(), rendering_params.get_screen_height(),
 														  texture, false, false, false);
 
-		Mat rendered_face = core::to_mat(rendering);
-		int x0 = rendered_face.cols;
-		int y0 = rendered_face.rows;
+		int x0 = rendering.cols;
+		int y0 = rendering.rows;
 		int x1 = 0;
 		int y1 = 0;
 
-		for (int i = 0; i < rendered_face.rows; ++i) {
-			for (int j = 0; j < rendered_face.cols; ++j) {
-				cv::Vec4b &rgba = rendered_face.at<cv::Vec4b>(i, j);
-				if (rgba[0] | rgba[1] | rgba[2] | rgba[3]) {
-					frame.at<cv::Vec3b>(i, j) = cv::Vec3b(rgba[0], rgba[1], rgba[2]);
-					if (i < y0) { y0 = i; }
-					if (i > y1) { y1 = i; }
-					if (j < x0) { x0 = j; }
-					if (j > x1) { x1 = j; }
+		cv::Mat rendered_face(rendering.rows, rendering.cols, CV_8UC3);
+		for (int col = 0; col < rendering.cols; ++col)
+		{
+			for (int row = 0; row < rendering.rows; ++row)
+			{
+				auto r = rendering(row, col)[0];
+				auto g = rendering(row, col)[1];
+				auto b = rendering(row, col)[2];
+				auto a = rendering(row, col)[3];
+
+				// convert rendering(Image4u) into opencv Mat type
+				rendered_face.at<cv::Vec3b>(row, col) = cv::Vec3b(r, g, b);
+
+				// the alpha value of a pixel is initially 0, and changed to 255 after rendered
+				if (a)
+				{
+					// replace pixel value with the rendering result
+					frame.at<cv::Vec3b>(row, col) = cv::Vec3b(r, g, b);
+
+					// store the border of face rectangle
+					if (row < y0) { y0 = row; }
+					if (row > y1) { y1 = row; }
+					if (col < x0) { x0 = col; }
+					if (col > x1) { x1 = col; }
 				}
 			}
 		}
 
 		Rect rendered_rect(x0, y0, x1 - x0, y1 - y0);
+		Mat face_area(rendered_face, rendered_rect);
 
-		Mat face_im = Mat(unmodified_frame, rendered_rect).clone();
-		Mat render_im = Mat(frame, rendered_rect).clone();
+		Mat face_im = Mat::zeros(rendered_rect.size(), CV_8UC3);
+		Mat(unmodified_frame, rendered_rect).copyTo(face_im, face_area);
+
+		Mat render_im = Mat::zeros(rendered_rect.size(), CV_8UC3);
+		Mat(frame, rendered_rect).copyTo(render_im, face_area);
+
 		face_im.convertTo(face_im, CV_32F, 1.0 / 255.0);
 		render_im.convertTo(render_im, CV_32F, 1.0 / 255.0);
 
@@ -259,7 +277,8 @@ int main(int argc, char *argv[])
 		cv::addWeighted(base, 0.4, render_im, 0.6, 0, render_im);
 		cv::multiply(render_im, face_im, render_im);
 
-		render_im.convertTo(Mat(frame, rendered_rect), CV_8U, 255);
+		render_im.convertTo(render_im, CV_8U, 255);
+		render_im.copyTo(Mat(frame, rendered_rect), face_area);
 
 		shape_coefficients = pca_shape_merging.add_and_merge(shape_coefficients);
 
@@ -267,7 +286,6 @@ int main(int argc, char *argv[])
 		cv::imshow("render", frame);
 
 		auto key = cv::waitKey(30);
-		cout << "key pressed " << key << endl;
 		if (key == 'q') break;
 		if (key == 's')
 		{
