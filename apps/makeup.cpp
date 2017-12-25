@@ -18,6 +18,7 @@
  * limitations under the License.
  */
 #include "helpers.hpp"
+#include "guidedfilter.h"
 
 #include "eos/core/Landmark.hpp"
 #include "eos/core/LandmarkMapper.hpp"
@@ -54,17 +55,12 @@ using namespace eos;
 namespace po = boost::program_options;
 namespace fs = boost::filesystem;
 using cv::Mat;
-using cv::Vec2f;
 using cv::Rect;
 using std::cout;
 using std::endl;
 using std::vector;
 using std::string;
 
-using Eigen::Vector2f;
-using Eigen::VectorXf;
-
-void draw_axes_topright(float r_x, float r_y, float r_z, cv::Mat image);
 
 /**
  * This app demonstrates facial landmark tracking, estimation of the 3D pose
@@ -73,7 +69,7 @@ void draw_axes_topright(float r_x, float r_y, float r_z, cv::Mat image);
  */
 int main(int argc, char *argv[])
 {
-	string modelfile, inputvideo, facedetector, landmarkdetector, mappingsfile, contourfile, edgetopologyfile, blendshapesfile;
+	string modelfile, inputvideo, facedetector, landmarkdetector, mappingsfile, contourfile, edgetopologyfile, blendshapesfile, texturefile;
 	try {
 		po::options_description desc("Allowed options");
 		desc.add_options()
@@ -93,6 +89,8 @@ int main(int argc, char *argv[])
 				"file with model's precomputed edge topology")
 			("blendshapes,b", po::value<string>(&blendshapesfile)->required()->default_value("../share/expression_blendshapes_3448.bin"),
 				"file with blendshapes")
+			("texture,t", po::value<string>(&texturefile)->required()->default_value("../share/makeup.png"),
+				"image file used as texture")
 			("input,i", po::value<string>(&inputvideo),
 				"input video file. If not specified, camera 0 will be used.")
 			;
@@ -155,13 +153,18 @@ int main(int argc, char *argv[])
 	cv::namedWindow("video", 1);
 	cv::namedWindow("render", 1);
 
-	Mat frame, unmodified_frame;
+	Mat frame, unmodified_frame, isomap, mask;
+
+	isomap = cv::imread(texturefile, CV_LOAD_IMAGE_UNCHANGED);
+
+	render::Texture texture = render::create_mipmapped_texture(isomap);
 
 	bool have_face = false;
-	rcr::LandmarkCollection<Vec2f> current_landmarks;
+	rcr::LandmarkCollection<cv::Vec2f> current_landmarks;
 	Rect current_facebox;
-	WeightedIsomapAveraging isomap_averaging(60.f); // merge all triangles that are facing <60� towards the camera
 	PcaCoefficientMerging pca_shape_merging;
+	vector<float> shape_coefficients, blendshape_coefficients;
+	vector<Eigen::Vector2f> image_points;
 
 	for (;;)
 	{
@@ -177,10 +180,11 @@ int main(int argc, char *argv[])
 		}
 
 		unmodified_frame = frame.clone();
-
+		vector<Rect> detected_faces;
+		cv::Rect enclosing_bbox;
 		if (!have_face) {
 			// Run the face detector and obtain the initial estimate using the mean landmarks:
-			vector<Rect> detected_faces;
+
 			face_cascade.detectMultiScale(unmodified_frame, detected_faces, 1.2, 2, 0, cv::Size(110, 110));
 			if (detected_faces.empty()) {
 				cv::imshow("video", frame);
@@ -193,14 +197,13 @@ int main(int argc, char *argv[])
 			Rect ibug_facebox = rescale_facebox(detected_faces[0], 0.85, 0.2);
 
 			current_landmarks = rcr_model.detect(unmodified_frame, ibug_facebox);
-			rcr::draw_landmarks(frame, current_landmarks, { 0, 0, 255 }); // red, initial landmarks
 
 			have_face = true;
 		}
 		else {
 			// We already have a face - track and initialise using the enclosing bounding
 			// box from the landmarks from the last frame:
-			auto enclosing_bbox = get_enclosing_bbox(rcr::to_row(current_landmarks));
+			enclosing_bbox = get_enclosing_bbox(rcr::to_row(current_landmarks));
 			enclosing_bbox = make_bbox_square(enclosing_bbox);
 			current_landmarks = rcr_model.detect(unmodified_frame, enclosing_bbox);
 			rcr::draw_landmarks(frame, current_landmarks, { 255, 0, 0 }); // blue, the new optimised landmarks
@@ -208,84 +211,76 @@ int main(int argc, char *argv[])
 
 		// Fit the 3DMM:
 		fitting::RenderingParameters rendering_params;
-		vector<float> shape_coefficients, blendshape_coefficients;
-		vector<Vector2f> image_points;
 		core::Mesh mesh;
 		std::tie(mesh, rendering_params) = fitting::fit_shape_and_pose(morphable_model, blendshapes, rcr_to_eos_landmark_collection(current_landmarks), landmark_mapper, unmodified_frame.cols, unmodified_frame.rows, edge_topology, ibug_contour, model_contour, 3, 5, 15.0f, std::nullopt, shape_coefficients, blendshape_coefficients, image_points);
 
-		// Draw the 3D pose of the face:
-		draw_axes_topright(glm::eulerAngles(rendering_params.get_rotation())[0], glm::eulerAngles(rendering_params.get_rotation())[1], glm::eulerAngles(rendering_params.get_rotation())[2], frame);
-
-		// Wireframe rendering of mesh of this frame (non-averaged):
-		draw_wireframe(frame, mesh, rendering_params.get_modelview(), rendering_params.get_projection(), fitting::get_opencv_viewport(frame.cols, frame.rows));
-
-		// Extract the texture using the fitted mesh from this frame:
-		const Eigen::Matrix<float, 3, 4> affine_cam = fitting::get_3x4_affine_camera_matrix(rendering_params, frame.cols, frame.rows);
-		const core::Image4u isomap = render::extract_texture(mesh, affine_cam, core::from_mat(unmodified_frame), true, render::TextureInterpolation::NearestNeighbour, 512);
-
-		// Merge the isomaps - add the current one to the already merged ones:
-		Mat merged_isomap = isomap_averaging.add_and_merge(core::to_mat(isomap));
-		// Same for the shape:
-		shape_coefficients = pca_shape_merging.add_and_merge(shape_coefficients);
-		VectorXf merged_shape = morphable_model.get_shape_model().draw_sample(shape_coefficients) + morphablemodel::to_matrix(blendshapes) * Eigen::Map<const VectorXf>(blendshape_coefficients.data(), blendshape_coefficients.size());
-		core::Mesh merged_mesh = morphablemodel::sample_to_mesh(merged_shape, morphable_model.get_color_model().get_mean(), morphable_model.get_shape_model().get_triangle_list(), morphable_model.get_color_model().get_triangle_list(), morphable_model.get_texture_coordinates());
-
-		// Render the model in a separate window using the estimated pose, shape and merged texture:
 		core::Image4u rendering;
-		auto modelview_no_translation = rendering_params.get_modelview();
-		modelview_no_translation[3][0] = 0;
-		modelview_no_translation[3][1] = 0;
-		std::tie(rendering, std::ignore) = render::render(merged_mesh, modelview_no_translation, glm::ortho(-130.0f, 130.0f, -130.0f, 130.0f), 256, 256, render::create_mipmapped_texture(merged_isomap), true, false, false);
-		cv::imshow("render", core::to_mat(rendering));
+		std::tie(rendering, std::ignore) = render::render(mesh, rendering_params.get_modelview(), rendering_params.get_projection(),
+														  rendering_params.get_screen_width(), rendering_params.get_screen_height(),
+														  texture, false, false, false);
 
-		cv::imshow("video", frame);
-		auto key = cv::waitKey(30);
-		if (key == 'q') break;
-		if (key == 'r') {
-			have_face = false;
-			isomap_averaging = WeightedIsomapAveraging(60.f);
+		Mat rendered_face = core::to_mat(rendering);
+		int x0 = rendered_face.cols;
+		int y0 = rendered_face.rows;
+		int x1 = 0;
+		int y1 = 0;
+
+		for (int i = 0; i < rendered_face.rows; ++i) {
+			for (int j = 0; j < rendered_face.cols; ++j) {
+				cv::Vec4b &rgba = rendered_face.at<cv::Vec4b>(i, j);
+				if (rgba[0] | rgba[1] | rgba[2] | rgba[3]) {
+					frame.at<cv::Vec3b>(i, j) = cv::Vec3b(rgba[0], rgba[1], rgba[2]);
+					if (i < y0) { y0 = i; }
+					if (i > y1) { y1 = i; }
+					if (j < x0) { x0 = j; }
+					if (j > x1) { x1 = j; }
+				}
+			}
 		}
-		if (key == 's') {
-			// save an obj + current merged isomap to the disk:
-			core::Mesh neutral_expression = morphablemodel::sample_to_mesh(morphable_model.get_shape_model().draw_sample(shape_coefficients), morphable_model.get_color_model().get_mean(), morphable_model.get_shape_model().get_triangle_list(), morphable_model.get_color_model().get_triangle_list(), morphable_model.get_texture_coordinates());
-			core::write_textured_obj(neutral_expression, "current_merged.obj");
-			cv::imwrite("current_merged.isomap.png", merged_isomap);
+
+		Rect rendered_rect(x0, y0, x1 - x0, y1 - y0);
+
+		Mat face_im = Mat(unmodified_frame, rendered_rect).clone();
+		Mat render_im = Mat(frame, rendered_rect).clone();
+		face_im.convertTo(face_im, CV_32F, 1.0 / 255.0);
+		render_im.convertTo(render_im, CV_32F, 1.0 / 255.0);
+
+		int r = 16;
+		double eps = 0.1 * 0.1;
+
+		Mat base = guidedFilter(face_im, face_im, r, eps);
+
+		// S = (face_im ./ base) ^ 2.2;
+		cv::divide(face_im, base, face_im);
+		cv::pow(face_im, 2.2, face_im);
+
+		// R = 0.4 * base + 0.6 * render_im;
+		// X = R .* S;
+		cv::addWeighted(base, 0.4, render_im, 0.6, 0, render_im);
+		cv::multiply(render_im, face_im, render_im);
+
+		render_im.convertTo(Mat(frame, rendered_rect), CV_8U, 255);
+
+		shape_coefficients = pca_shape_merging.add_and_merge(shape_coefficients);
+
+		cv::imshow("video", unmodified_frame);
+		cv::imshow("render", frame);
+
+		auto key = cv::waitKey(30);
+		cout << "key pressed " << key << endl;
+		if (key == 'q') break;
+		if (key == 's')
+		{
+			Mat face_im = Mat(unmodified_frame, rendered_rect);
+			cv::imwrite("face.png", face_im);
+
+			Mat render_im = Mat(frame, rendered_rect);
+			cv::imwrite("render.png", render_im);
+
+			// save an obj to the disk:
+			core::write_textured_obj(mesh, "current_mesh.obj");
 		}
 	}
 
 	return EXIT_SUCCESS;
-};
-
-/**
- * @brief Draws 3D axes onto the top-right corner of the image. The
- * axes are oriented corresponding to the given angles.
- *
- * @param[in] r_x Pitch angle, in radians.
- * @param[in] r_y Yaw angle, in radians.
- * @param[in] r_z Roll angle, in radians.
- * @param[in] image The image to draw onto.
- */
-void draw_axes_topright(float r_x, float r_y, float r_z, cv::Mat image)
-{
-	const glm::vec3 origin(0.0f, 0.0f, 0.0f);
-	const glm::vec3 x_axis(1.0f, 0.0f, 0.0f);
-	const glm::vec3 y_axis(0.0f, 1.0f, 0.0f);
-	const glm::vec3 z_axis(0.0f, 0.0f, 1.0f);
-
-	const auto rot_mtx_x = glm::rotate(glm::mat4(1.0f), r_x, glm::vec3{ 1.0f, 0.0f, 0.0f });
-	const auto rot_mtx_y = glm::rotate(glm::mat4(1.0f), r_y, glm::vec3{ 0.0f, 1.0f, 0.0f });
-	const auto rot_mtx_z = glm::rotate(glm::mat4(1.0f), r_z, glm::vec3{ 0.0f, 0.0f, 1.0f });
-	const auto modelview = rot_mtx_z * rot_mtx_x * rot_mtx_y;
-
-	const auto viewport = fitting::get_opencv_viewport(image.cols, image.rows);
-	const float aspect = static_cast<float>(image.cols) / image.rows;
-	const auto ortho_projection = glm::ortho(-3.0f * aspect, 3.0f * aspect, -3.0f, 3.0f);
-	const auto translate_topright = glm::translate(glm::mat4(1.0f), glm::vec3(0.7f, 0.65f, 0.0f));
-	const auto o_2d = glm::project(origin, modelview, translate_topright * ortho_projection, viewport);
-	const auto x_2d = glm::project(x_axis, modelview, translate_topright * ortho_projection, viewport);
-	const auto y_2d = glm::project(y_axis, modelview, translate_topright * ortho_projection, viewport);
-	const auto z_2d = glm::project(z_axis, modelview, translate_topright * ortho_projection, viewport);
-	cv::line(image, cv::Point2f{ o_2d.x, o_2d.y }, cv::Point2f{ x_2d.x, x_2d.y }, { 0, 0, 255 });
-	cv::line(image, cv::Point2f{ o_2d.x, o_2d.y }, cv::Point2f{ y_2d.x, y_2d.y }, { 0, 255, 0 });
-	cv::line(image, cv::Point2f{ o_2d.x, o_2d.y }, cv::Point2f{ z_2d.x, z_2d.y }, { 255, 0, 0 });
 };

@@ -40,6 +40,28 @@
 #include <algorithm>
 #include <iterator>
 #include <cassert>
+#include <cmath>
+
+
+float cosine_similarity(const std::vector<float>& a, const std::vector<float>& b)
+{
+	if (a.size() != b.size()) {
+		return 0.0f;
+	}
+
+	float dotproduct = 0;
+	float distance_a = 0;
+	float distance_b = 0;
+
+	for (size_t i = 0; i < a.size(); ++i)
+	{
+		dotproduct += a.at(i) * b.at(i);
+		distance_a += a.at(i) * a.at(i);
+		distance_b += b.at(i) * b.at(i);
+	}
+
+	return dotproduct / (sqrt(distance_a) * sqrt(distance_b));
+}
 
 /**
  * @brief Scales and translates a facebox. Useful for converting
@@ -231,19 +253,30 @@ public:
 	{
 		if (merged_shape_coefficients.empty())
 		{
-			merged_shape_coefficients = cv::Mat::zeros(coefficients.size(), 1, CV_32FC1);
+			merged_shape_coefficients = std::vector<float>(coefficients.size(), 0.0f);
 		}
-		assert(coefficients.size() == merged_shape_coefficients.rows);
 
-		cv::Mat test(coefficients);
-		merged_shape_coefficients = (merged_shape_coefficients * num_processed_frames + test) / (num_processed_frames + 1.0f);
+		assert(coefficients.size() == merged_shape_coefficients.size());
+
+		float N = num_processed_frames + 1.0f;
+		for (size_t i = 0; i < merged_shape_coefficients.size(); ++i)
+		{
+			merged_shape_coefficients[i] = (merged_shape_coefficients.at(i) * num_processed_frames + coefficients.at(i)) / N;
+		}
+
 		++num_processed_frames;
-		return std::vector<float>(merged_shape_coefficients.begin<float>(), merged_shape_coefficients.end<float>());
+
+		return merged_shape_coefficients;
 	};
+
+	const std::vector<float>& get_merged_shape_coefficients() const
+	{
+		return merged_shape_coefficients;
+	}
 
 private:
 	int num_processed_frames = 0;
-	cv::Mat merged_shape_coefficients;
+	std::vector<float> merged_shape_coefficients;
 };
 
 #endif /* APP_HELPERS_HPP_ */

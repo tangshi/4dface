@@ -1,9 +1,9 @@
-project(4dface)
+project(makeup)
 cmake_minimum_required(VERSION 2.8.10)
-set(4dface_VERSION_MAJOR 0)
-set(4dface_VERSION_MINOR 2)
-set(4dface_VERSION_PATCH 0)
-set(4dface_VERSION ${4dface_VERSION_MAJOR}.${4dface_VERSION_MINOR}.${4dface_VERSION_PATCH})
+set(makeup_VERSION_MAJOR 0)
+set(makeup_VERSION_MINOR 2)
+set(makeup_VERSION_PATCH 0)
+set(makeup_VERSION ${makeup_VERSION_MAJOR}.${makeup_VERSION_MINOR}.${makeup_VERSION_PATCH})
 
 # Check if a supported compiler is used and add c++14 flag:
 if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
@@ -37,9 +37,9 @@ endif()
 # Build a CPack driven installer package:
 include(InstallRequiredSystemLibraries) # Includes any runtime libraries that are needed by the project for the current platform
 set(CPACK_RESOURCE_FILE_LICENSE "${CMAKE_CURRENT_SOURCE_DIR}/LICENSE")
-set(CPACK_PACKAGE_VERSION_MAJOR "${4dface_VERSION_MAJOR}")
-set(CPACK_PACKAGE_VERSION_MINOR "${4dface_VERSION_MINOR}")
-set(CPACK_PACKAGE_VERSION_PATCH "${4dface_VERSION_PATCH}")
+set(CPACK_PACKAGE_VERSION_MAJOR "${makeup_VERSION_MAJOR}")
+set(CPACK_PACKAGE_VERSION_MINOR "${makeup_VERSION_MINOR}")
+set(CPACK_PACKAGE_VERSION_PATCH "${makeup_VERSION_PATCH}")
 include(CPack)
 
 # Find dependencies:
@@ -112,13 +112,13 @@ include_directories(${glm_INCLUDE_DIR})
 include_directories(${nanoflann_INCLUDE_DIR})
 include_directories(${eigen3_nnls_INCLUDE_DIR})
 include_directories(${toml_INCLUDE_DIR})
-message("OpenCV_LIBS: ${OpenCV_LIBS}")
-message("Boost_LIBRARIES: ${Boost_LIBRARIES}")
-add_executable(4dface apps/4dface.cpp apps/helpers.hpp)
-target_link_libraries(4dface ${OpenCV_LIBS} ${Boost_LIBRARIES})
+include_directories("${CMAKE_SOURCE_DIR}/apps")
+
+add_executable(makeup apps/makeup.cpp apps/helpers.hpp apps/guidedfilter.cpp)
+target_link_libraries(makeup ${OpenCV_LIBS} ${Boost_LIBRARIES})
 
 # install targets:
-install(TARGETS 4dface DESTINATION bin)
+install(TARGETS makeup DESTINATION bin)
 install(DIRECTORY ${eos_DIR}/share/ DESTINATION share)
 install(FILES ${CMAKE_BINARY_DIR}/face_landmarks_model_rcr_68.bin DESTINATION share)
 install(FILES ${OpenCV_haarcascades_DIR}/haarcascade_frontalface_alt2.xml DESTINATION share)
