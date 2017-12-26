@@ -88,6 +88,7 @@ int main(int argc, char *argv[])
 				"file with model's precomputed edge topology")
 			("blendshapes,b", po::value<string>(&blendshapesfile)->required()->default_value("../share/expression_blendshapes_3448.bin"),
 				"file with blendshapes")
+			("texture,x", po::value<string>(&texturefile), "texture file used for target video")
 			("reference,r", po::value<string>(&reference_video)->required(),
 				"reference video file. If not specified, camera 0 will be used.")
 			("target,t", po::value<string>(&target_video)->required(),
@@ -154,11 +155,14 @@ int main(int argc, char *argv[])
 
 	morphablemodel::EdgeTopology edge_topology = morphablemodel::load_edge_topology(edgetopologyfile);
 
-	cv::namedWindow("reference", 1);
-	cv::namedWindow("target", 1);
-	cv::namedWindow("result", 1);
+	Mat rframe, tframe, isomap;
 
-	Mat rframe, tframe;
+	render::Texture texture;
+
+	if (!texturefile.empty()) {
+		isomap = cv::imread(texturefile, CV_LOAD_IMAGE_UNCHANGED);
+		texture = render::create_mipmapped_texture(isomap);
+	}
 
 	bool ref_have_face = false;
 	bool tgt_have_face = false;
@@ -171,6 +175,10 @@ int main(int argc, char *argv[])
 
 	vector<float> ref_shape_coefficients, ref_blendshape_coefficients;
 	vector<float> tgt_shape_coefficients, tgt_blendshape_coefficients;
+
+	cv::namedWindow("reference", 1);
+	cv::namedWindow("target", 1);
+	cv::namedWindow("result", 1);
 
 	for (;;)
 	{
@@ -237,13 +245,6 @@ int main(int argc, char *argv[])
 		// fit target frame
 		std::tie(tgt_mesh, tgt_rendering_params) = fitting::fit_shape_and_pose(morphable_model, blendshapes, rcr_to_eos_landmark_collection(tgt_lms), landmark_mapper, tframe.cols, tframe.rows, edge_topology, ibug_contour, model_contour, 3, 5, 15.0f, std::nullopt, tgt_shape_coefficients, tgt_blendshape_coefficients, image_points);
 
-		// Extract the texture using the fitted mesh from the target frame:
-		const Eigen::Matrix<float, 3, 4> affine_cam = fitting::get_3x4_affine_camera_matrix(tgt_rendering_params, tframe.cols, tframe.rows);
-		const core::Image4u isomap = render::extract_texture(tgt_mesh, affine_cam, core::from_mat(tframe), true, render::TextureInterpolation::NearestNeighbour, 512);
-
-		// Merge the isomaps - add the current one to the already merged ones:
-		Mat merged_isomap = tgt_isomap_averaging.add_and_merge(isomap);
-
 		// transfer the expression coefficients
 		VectorXf transferred_shape = morphable_model.get_shape_model().draw_sample(tgt_shape_coefficients) + morphablemodel::to_matrix(blendshapes) * Eigen::Map<const VectorXf>(ref_blendshape_coefficients.data(), ref_blendshape_coefficients.size());
 
@@ -254,11 +255,25 @@ int main(int argc, char *argv[])
 		// generate transferred mesh
 		core::Mesh transferred_mesh = morphablemodel::sample_to_mesh(transferred_shape, morphable_model.get_color_model().get_mean(), morphable_model.get_shape_model().get_triangle_list(), morphable_model.get_color_model().get_triangle_list(), morphable_model.get_texture_coordinates());
 
+		// if texture file not provided, extract it from target video frame
+		if (texturefile.empty())
+		{
+			// Extract the texture using the fitted mesh from the target frame:
+			const Eigen::Matrix<float, 3, 4> affine_cam = fitting::get_3x4_affine_camera_matrix(tgt_rendering_params, tframe.cols, tframe.rows);
+			const core::Image4u extracted_isomap = render::extract_texture(tgt_mesh, affine_cam, core::from_mat(tframe), true, render::TextureInterpolation::NearestNeighbour, 512);
+
+			// Merge the isomaps - add the current one to the already merged ones:
+			isomap = tgt_isomap_averaging.add_and_merge(extracted_isomap);
+
+			// create texture
+			texture = render::create_mipmapped_texture(isomap);
+		}
+
 		// Render the transferred model
 		core::Image4u rendering;
 		std::tie(rendering, std::ignore) = render::render(transferred_mesh, tgt_rendering_params.get_modelview(), tgt_rendering_params.get_projection(),
 														  tgt_rendering_params.get_screen_width(), tgt_rendering_params.get_screen_height(),
-														  render::create_mipmapped_texture(merged_isomap), true, false, false);
+														  texture, true, false, false);
 
 		// map the rendered image to the target frame
 		cv::Mat rendered_face(rendering.rows, rendering.cols, CV_8UC3);
@@ -297,7 +312,7 @@ int main(int argc, char *argv[])
 			// save an obj + current merged isomap to the disk:
 			core::Mesh neutral_expression = morphablemodel::sample_to_mesh(morphable_model.get_shape_model().draw_sample(tgt_shape_coefficients), morphable_model.get_color_model().get_mean(), morphable_model.get_shape_model().get_triangle_list(), morphable_model.get_color_model().get_triangle_list(), morphable_model.get_texture_coordinates());
 			core::write_textured_obj(neutral_expression, "current_merged.obj");
-			cv::imwrite("current_merged.isomap.png", merged_isomap);
+			cv::imwrite("current_merged.isomap.png", isomap);
 		}
 
 	} // end for loop
