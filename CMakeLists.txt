@@ -120,9 +120,13 @@ target_link_libraries(4dface ${OpenCV_LIBS} ${Boost_LIBRARIES})
 add_executable(makeup apps/makeup.cpp apps/helpers.hpp apps/guidedfilter.cpp)
 target_link_libraries(makeup ${OpenCV_LIBS} ${Boost_LIBRARIES})
 
+add_executable(expression apps/expression.cpp apps/helpers.hpp)
+target_link_libraries(expression ${OpenCV_LIBS} ${Boost_LIBRARIES})
+
 # install targets:
 install(TARGETS 4dface DESTINATION bin)
 install(TARGETS makeup DESTINATION bin)
+install(TARGETS expression DESTINATION bin)
 install(DIRECTORY ${eos_DIR}/share/ DESTINATION share)
 install(FILES ${CMAKE_BINARY_DIR}/face_landmarks_model_rcr_68.bin DESTINATION share)
 install(FILES ${OpenCV_haarcascades_DIR}/haarcascade_frontalface_alt2.xml DESTINATION share)
