@@ -224,7 +224,7 @@ int main(int argc, char *argv[])
 		const core::Image4u isomap = render::extract_texture(mesh, affine_cam, core::from_mat(unmodified_frame), true, render::TextureInterpolation::NearestNeighbour, 512);
 
 		// Merge the isomaps - add the current one to the already merged ones:
-		Mat merged_isomap = isomap_averaging.add_and_merge(core::to_mat(isomap));
+		Mat merged_isomap = isomap_averaging.add_and_merge(isomap);
 		// Same for the shape:
 		shape_coefficients = pca_shape_merging.add_and_merge(shape_coefficients);
 		VectorXf merged_shape = morphable_model.get_shape_model().draw_sample(shape_coefficients) + morphablemodel::to_matrix(blendshapes) * Eigen::Map<const VectorXf>(blendshape_coefficients.data(), blendshape_coefficients.size());
