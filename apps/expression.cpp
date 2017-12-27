@@ -155,22 +155,21 @@ int main(int argc, char *argv[])
 
 	morphablemodel::EdgeTopology edge_topology = morphablemodel::load_edge_topology(edgetopologyfile);
 
-	Mat rframe, tframe, isomap;
-
-	render::Texture texture;
+	Mat rframe, tframe, mean_isomap;
 
 	if (!texturefile.empty()) {
-		isomap = cv::imread(texturefile, CV_LOAD_IMAGE_UNCHANGED);
-		texture = render::create_mipmapped_texture(isomap);
+		mean_isomap = cv::imread(texturefile, CV_LOAD_IMAGE_UNCHANGED);
+		if (mean_isomap.type() == CV_8UC3)
+		{
+			mean_isomap.convertTo(mean_isomap, CV_8UC4);
+			cv::cvtColor(mean_isomap, mean_isomap, CV_BGR2BGRA);
+		}
 	}
 
 	bool ref_have_face = false;
 	bool tgt_have_face = false;
 	rcr::LandmarkCollection<cv::Vec2f> ref_lms, tgt_lms;
 
-	// merge all triangles that are facing <60° towards the camera
-	// only target one needs texture
-	WeightedIsomapAveraging tgt_isomap_averaging(60.f);
 	PcaCoefficientMerging ref_pca_shape_merging, tgt_pca_shape_merging;
 
 	vector<float> ref_shape_coefficients, ref_blendshape_coefficients;
@@ -255,25 +254,58 @@ int main(int argc, char *argv[])
 		// generate transferred mesh
 		core::Mesh transferred_mesh = morphablemodel::sample_to_mesh(transferred_shape, morphable_model.get_color_model().get_mean(), morphable_model.get_shape_model().get_triangle_list(), morphable_model.get_color_model().get_triangle_list(), morphable_model.get_texture_coordinates());
 
-		// if texture file not provided, extract it from target video frame
-		if (texturefile.empty())
+		// Extract the texture using the fitted mesh from the target frame:
+		const Eigen::Matrix<float, 3, 4> affine_cam = fitting::get_3x4_affine_camera_matrix(tgt_rendering_params, tframe.cols, tframe.rows);
+		const core::Image4u extracted_isomap = render::extract_texture(tgt_mesh, affine_cam, core::from_mat(tframe), true, render::TextureInterpolation::NearestNeighbour, std::max(512, mean_isomap.rows));
+
+		Mat current_isomap = core::to_mat(extracted_isomap);
+
+		// if mean texture file has provided,
+		// fill the black pixels with the corresponding pixels from the mean texture
+		if (!mean_isomap.empty())
 		{
-			// Extract the texture using the fitted mesh from the target frame:
-			const Eigen::Matrix<float, 3, 4> affine_cam = fitting::get_3x4_affine_camera_matrix(tgt_rendering_params, tframe.cols, tframe.rows);
-			const core::Image4u extracted_isomap = render::extract_texture(tgt_mesh, affine_cam, core::from_mat(tframe), true, render::TextureInterpolation::NearestNeighbour, 512);
-
-			// Merge the isomaps - add the current one to the already merged ones:
-			isomap = tgt_isomap_averaging.add_and_merge(extracted_isomap);
-
-			// create texture
-			texture = render::create_mipmapped_texture(isomap);
+			for (int col = 0; col < current_isomap.cols; ++col)
+			{
+				for (int row = 0; row < current_isomap.rows; ++row)
+				{
+					cv::Vec4b &rgba = current_isomap.at<cv::Vec4b>(row, col);
+					bool isblack = !(rgba[0] | rgba[1] | rgba[2]);
+					if (isblack) {
+						rgba = mean_isomap.at<cv::Vec4b>(row, col);
+					}
+				}
+			}
 		}
+
+		const glm::mat4x4 modelview = tgt_rendering_params.get_modelview();
+		const glm::mat4x4 projection = tgt_rendering_params.get_projection();
 
 		// Render the transferred model
 		core::Image4u rendering;
-		std::tie(rendering, std::ignore) = render::render(transferred_mesh, tgt_rendering_params.get_modelview(), tgt_rendering_params.get_projection(),
+		std::tie(rendering, std::ignore) = render::render(transferred_mesh, modelview, projection,
 														  tgt_rendering_params.get_screen_width(), tgt_rendering_params.get_screen_height(),
-														  texture, true, false, false);
+														  render::create_mipmapped_texture(current_isomap), true, false, false);
+
+		vector<int> x_axis;
+		vector<int> y_axis;
+
+		// landmarks indices of outer mouth area
+		const static vector<int> mouth_vertex_indices = {398, 315, 413, 329, 825, 736, 812, 841, 693, 411, 264, 431};
+		for (int index : mouth_vertex_indices)
+		{
+			// project landmark point to image space
+			const auto p = glm::project({ transferred_mesh.vertices[index][0], transferred_mesh.vertices[index][1], transferred_mesh.vertices[index][2] },  modelview, projection, fitting::get_opencv_viewport(tframe.cols, tframe.rows));
+
+			x_axis.push_back(p.x);
+			y_axis.push_back(p.y);
+		}
+
+		auto x_minmax = std::minmax_element(x_axis.begin(), x_axis.end());
+		auto y_minmax = std::minmax_element(y_axis.begin(), y_axis.end());
+
+		cv::Point topleft(*x_minmax.first, *y_minmax.first);
+		cv::Point bottomright(*x_minmax.second, *y_minmax.second);
+		cv::Rect mouth_rect(topleft, bottomright);
 
 		// map the rendered image to the target frame
 		cv::Mat rendered_face(rendering.rows, rendering.cols, CV_8UC3);
@@ -286,9 +318,11 @@ int main(int argc, char *argv[])
 				auto b = rendering(row, col)[2];
 				auto a = rendering(row, col)[3];
 
-				// if the rendered pixel is visible, use it,
+				// if the rendered pixel is visible or inside mouth, use it,
 				// otherwise, use the correspondence pixel in tframe
-				if (r|g|b) {
+				bool pixel_visible = (r|g|b);
+				bool inside_mouth = mouth_rect.contains(cv::Point(col, row));
+				if (pixel_visible || inside_mouth) {
 					rendered_face.at<cv::Vec3b>(row, col) = cv::Vec3b(r, g, b);
 				}
 				else {
@@ -306,13 +340,12 @@ int main(int argc, char *argv[])
 		if (key == 'r') {
 			ref_have_face = false;
 			tgt_have_face = false;
-			tgt_isomap_averaging = WeightedIsomapAveraging(60.f);
 		}
 		if (key == 's') {
 			// save an obj + current merged isomap to the disk:
 			core::Mesh neutral_expression = morphablemodel::sample_to_mesh(morphable_model.get_shape_model().draw_sample(tgt_shape_coefficients), morphable_model.get_color_model().get_mean(), morphable_model.get_shape_model().get_triangle_list(), morphable_model.get_color_model().get_triangle_list(), morphable_model.get_texture_coordinates());
 			core::write_textured_obj(neutral_expression, "current_merged.obj");
-			cv::imwrite("current_merged.isomap.png", isomap);
+			cv::imwrite("current_merged.isomap.png", current_isomap);
 		}
 
 	} // end for loop
